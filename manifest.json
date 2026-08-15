@@ -1,0 +1,14 @@
+{
+  "name": "Evidencias POS",
+  "short_name": "Evidencias POS",
+  "description": "Registro local de evidencias fotográficas de soporte técnico.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f7f7",
+  "theme_color": "#0f766e",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
