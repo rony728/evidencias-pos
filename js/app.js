@@ -10,12 +10,12 @@ let selectedRecord = null;
 let pendingPhotos = new Map();
 let pendingRestore = null;
 
-const deviceLabels = { pos: 'POS', sim: 'SIM', lectora: 'Lectora', token: 'Token', powerbank: 'Powerbank' };
+const deviceLabels = { pos: 'POS', sim: 'SIM', lectora: 'Lectora', token: 'Token', powerbank: 'Powerbank', otros: 'Otros' };
 
 function recordCard(record) {
   const estado = record.estado === 'cerrado' ? 'CERRADO' : 'PENDIENTE';
   return `<button class="record-card" type="button" data-record-id="${escapeHtml(record.id)}">
-    <strong>Ticket ${escapeHtml(record.ticket)}</strong>
+    <strong>Nombre de Gestión: ${escapeHtml(record.ticket)}</strong>
     <p>${escapeHtml(record.cliente)}</p>
     <div class="record-meta"><span>${escapeHtml(formatDateTime(record.fechaCreacion))}</span><span>${estado}</span></div>
   </button>`;
@@ -42,9 +42,9 @@ async function renderHome() {
 function renderNew() {
   app.innerHTML = `<section class="hero"><h2>Nuevo registro</h2><p class="subtitle">Completa los datos de la visita y selecciona los dispositivos reemplazados.</p></section>
     <form class="form-card" id="new-ticket-form">
-      <div class="field"><label for="ticket">Número de ticket</label><input id="ticket" name="ticket" inputmode="numeric" required placeholder="Ej. 584721"></div>
-      <div class="field"><label for="cliente">Nombre del cliente</label><input id="cliente" name="cliente" required placeholder="Ej. Juan Pérez"></div>
-      <div class="field"><label for="telefono">Teléfono del cliente</label><input id="telefono" name="telefono" type="tel" required placeholder="Ej. 9999-9999"></div>
+      <div class="field"><label for="ticket">Nombre de Gestión</label><input id="ticket" name="ticket" type="text" required placeholder="Ej. Cambio POS 584721"></div>
+      <div class="field"><label for="cliente">Nombre del cliente <span class="helper">(opcional)</span></label><input id="cliente" name="cliente" placeholder="Ej. Juan Pérez"></div>
+      <div class="field"><label for="telefono">Teléfono del cliente <span class="helper">(opcional)</span></label><input id="telefono" name="telefono" type="tel" placeholder="Ej. 9999-9999"></div>
       <div class="field"><label for="observaciones">Observaciones <span class="helper">(opcional)</span></label><textarea id="observaciones" name="observaciones" placeholder="Notas de la visita..."></textarea></div>
       <fieldset><legend>¿Qué dispositivos reemplazaste?</legend><div class="device-grid">
         ${Object.entries(deviceLabels).map(([value, label]) => `<label class="device-option"><input type="checkbox" name="dispositivos" value="${value}"><span>${label}</span></label>`).join('')}
@@ -126,8 +126,8 @@ async function guardarFotosSeleccionadas() {
 }
 
 async function renderSearch() {
-  app.innerHTML = `<section class="hero"><h2>Buscar</h2><p class="subtitle">Encuentra un registro por ticket, cliente o teléfono.</p></section>
-    <div class="search-wrap"><input class="search-input" id="search-input" type="search" placeholder="Ticket / Cliente / Teléfono" aria-label="Buscar por ticket, cliente o teléfono"></div>
+  app.innerHTML = `<section class="hero"><h2>Buscar</h2><p class="subtitle">Encuentra un registro por nombre de gestión, cliente o teléfono.</p></section>
+    <div class="search-wrap"><input class="search-input" id="search-input" type="search" placeholder="Nombre de Gestión / Cliente / Teléfono" aria-label="Buscar por nombre de gestión, cliente o teléfono"></div>
     <div id="search-results" class="record-list">${renderEmpty('Cargando registros...')}</div>`;
   const results = document.querySelector('#search-results');
   async function updateResults(term = '') {
@@ -184,11 +184,11 @@ async function renderSettings() {
 }
 
 function renderEdit(record) {
-  app.innerHTML = `<section class="hero"><h2>Editar registro</h2><p class="subtitle">Actualiza los datos del ticket. Las fotografías y dispositivos seleccionados se conservarán.</p></section>
+  app.innerHTML = `<section class="hero"><h2>Editar registro</h2><p class="subtitle">Actualiza el nombre de gestión y los datos opcionales. Las fotografías y dispositivos seleccionados se conservarán.</p></section>
     <form class="form-card" id="edit-ticket-form">
-      <div class="field"><label for="edit-ticket">Número de ticket</label><input id="edit-ticket" name="ticket" required value="${escapeHtml(record.ticket)}"></div>
-      <div class="field"><label for="edit-cliente">Nombre del cliente</label><input id="edit-cliente" name="cliente" required value="${escapeHtml(record.cliente)}"></div>
-      <div class="field"><label for="edit-telefono">Teléfono del cliente</label><input id="edit-telefono" name="telefono" type="tel" required value="${escapeHtml(record.telefono)}"></div>
+      <div class="field"><label for="edit-ticket">Nombre de Gestión</label><input id="edit-ticket" name="ticket" type="text" required value="${escapeHtml(record.ticket)}"></div>
+      <div class="field"><label for="edit-cliente">Nombre del cliente <span class="helper">(opcional)</span></label><input id="edit-cliente" name="cliente" value="${escapeHtml(record.cliente)}"></div>
+      <div class="field"><label for="edit-telefono">Teléfono del cliente <span class="helper">(opcional)</span></label><input id="edit-telefono" name="telefono" type="tel" value="${escapeHtml(record.telefono)}"></div>
       <div class="field"><label for="edit-observaciones">Observaciones <span class="helper">(opcional)</span></label><textarea id="edit-observaciones" name="observaciones">${escapeHtml(record.observaciones || '')}</textarea></div>
       <button class="button button-primary" type="submit">GUARDAR CAMBIOS</button>
     </form>`;
@@ -219,8 +219,8 @@ async function renderDetail(record) {
   const stateAction = record.estado === 'cerrado'
     ? '<button class="button button-primary" type="button" data-action="reopen-ticket">REABRIR TICKET</button>'
     : '<button class="button button-primary" type="button" data-action="close-ticket">MARCAR COMO CERRADO</button>';
-  app.innerHTML = `<section class="hero"><h2>Detalle del registro</h2><p class="subtitle">Información del ticket guardada localmente.</p></section>
-    <div class="detail-card"><div class="detail-row"><span class="detail-label">Ticket</span><strong>${escapeHtml(record.ticket)}</strong></div><div class="detail-row"><span class="detail-label">Fecha</span><span>${escapeHtml(formatDateTime(record.fechaCreacion))}</span></div>${closeDate}<div class="detail-row"><span class="detail-label">Cliente</span><span>${escapeHtml(record.cliente)}</span></div><div class="detail-row"><span class="detail-label">Teléfono</span><span>${escapeHtml(record.telefono)}</span></div><div class="detail-row"><span class="detail-label">Estado</span><span class="status-badge ${record.estado === 'cerrado' ? 'is-closed' : ''}">${escapeHtml(record.estado.toUpperCase())}</span></div><div class="detail-row"><span class="detail-label">Observaciones</span><span>${escapeHtml(record.observaciones || 'Sin observaciones')}</span></div><div class="detail-row"><span class="detail-label">Dispositivos</span><span>${escapeHtml(devices.join(', ') || 'Sin dispositivos')}</span></div></div>
+  app.innerHTML = `<section class="hero"><h2>Detalle del registro</h2><p class="subtitle">Información de la gestión guardada localmente.</p></section>
+    <div class="detail-card"><div class="detail-row"><span class="detail-label">Nombre de Gestión</span><strong>${escapeHtml(record.ticket)}</strong></div><div class="detail-row"><span class="detail-label">Fecha</span><span>${escapeHtml(formatDateTime(record.fechaCreacion))}</span></div>${closeDate}<div class="detail-row"><span class="detail-label">Cliente</span><span>${escapeHtml(record.cliente || 'Sin nombre')}</span></div><div class="detail-row"><span class="detail-label">Teléfono</span><span>${escapeHtml(record.telefono || 'Sin teléfono')}</span></div><div class="detail-row"><span class="detail-label">Estado</span><span class="status-badge ${record.estado === 'cerrado' ? 'is-closed' : ''}">${escapeHtml(record.estado.toUpperCase())}</span></div><div class="detail-row"><span class="detail-label">Observaciones</span><span>${escapeHtml(record.observaciones || 'Sin observaciones')}</span></div><div class="detail-row"><span class="detail-label">Dispositivos</span><span>${escapeHtml(devices.join(', ') || 'Sin dispositivos')}</span></div></div>
     <section class="stored-gallery"><div class="section-heading"><h2>Fotografías</h2><span class="helper">${images.length}</span></div><div class="photo-gallery">${gallery}</div></section>
     <div class="button-stack"><button class="button button-secondary" type="button" data-action="edit-ticket">EDITAR</button>${stateAction}<button class="button button-danger" type="button" data-action="delete-ticket">ELIMINAR</button></div>`;
 }
@@ -282,10 +282,10 @@ document.addEventListener('click', (event) => {
   if (event.target.closest('[data-close-restore]')) { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); }
   if (event.target.closest('[data-action="edit-ticket"]')) void navigate('edit');
   if (event.target.closest('[data-action="close-ticket"]')) {
-    void cerrarTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Ticket marcado como cerrado.'); await navigate('detail'); }).catch((error) => { showToast('Error al cerrar el ticket.'); console.error(error); });
+    void cerrarTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión marcada como cerrada.'); await navigate('detail'); }).catch((error) => { showToast('Error al cerrar la gestión.'); console.error(error); });
   }
   if (event.target.closest('[data-action="reopen-ticket"]')) {
-    void reabrirTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Ticket reabierto correctamente.'); await navigate('detail'); }).catch((error) => { showToast('Error al reabrir el ticket.'); console.error(error); });
+    void reabrirTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión reabierta correctamente.'); await navigate('detail'); }).catch((error) => { showToast('Error al reabrir la gestión.'); console.error(error); });
   }
   if (event.target.closest('[data-action="delete-ticket"]')) {
     if (!selectedRecord || !window.confirm('¿Está seguro de eliminar este registro?\n\nTambién se eliminarán todas sus fotografías.')) return;

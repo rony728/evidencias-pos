@@ -2,7 +2,7 @@
 import { obtenerTodasImagenes, obtenerTickets, restaurarDatos } from './db.js';
 
 const BACKUP_FORMAT_VERSION = 1;
-const DEVICE_TYPES = new Set(['pos', 'sim', 'lectora', 'token', 'powerbank']);
+const DEVICE_TYPES = new Set(['pos', 'sim', 'lectora', 'token', 'powerbank', 'otros']);
 
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -58,7 +58,7 @@ export async function validarYLeerRespaldo(file) {
     throw new Error('El archivo no es un respaldo válido de Evidencias POS.');
   }
   data.tickets.forEach((ticket) => {
-    if (!ticket?.id || !ticket.ticket || !ticket.cliente || !ticket.telefono || !ticket.dispositivos || !Object.values(ticket.dispositivos).some(Boolean)) throw new Error('El respaldo contiene un ticket inválido.');
+    if (!ticket?.id || !ticket.ticket || !ticket.dispositivos || !Object.values(ticket.dispositivos).some(Boolean)) throw new Error('El respaldo contiene un ticket inválido.');
   });
   const imagenes = data.imagenes.map((imagen) => {
     if (!imagen.id || !imagen.ticketId || !DEVICE_TYPES.has(imagen.tipo) || typeof imagen.data !== 'string' || !imagen.data.startsWith('data:image/')) throw new Error('El respaldo contiene una fotografía inválida.');

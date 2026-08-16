@@ -40,6 +40,8 @@ La Etapa 4 agrega edición de ticket, cierre con `fechaCierre`, reapertura, elim
 
 La Etapa 5 agrega instalación como PWA, cache offline, respaldo JSON y restauración por reemplazo o combinación. El respaldo convierte las fotografías a Data URL solo dentro del archivo exportado; IndexedDB continúa utilizando Blob.
 
+El campo visible **Nombre de Gestión** mantiene internamente la propiedad `ticket` para conservar compatibilidad con registros anteriores, pero acepta texto libre. El cliente y teléfono son opcionales. El dispositivo `otros` utiliza el mismo flujo de fotografía, Blob, detalle, respaldo y restauración que los dispositivos existentes.
+
 ## Próximas etapas
 
 La aplicación está funcionalmente completa. Las futuras mejoras pueden incorporar OCR, series, recorte manual, estadísticas y filtros.

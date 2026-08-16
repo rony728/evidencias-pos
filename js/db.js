@@ -66,7 +66,8 @@ function prepararTicket(ticket) {
     sim: Boolean(ticket.dispositivos?.sim),
     lectora: Boolean(ticket.dispositivos?.lectora),
     token: Boolean(ticket.dispositivos?.token),
-    powerbank: Boolean(ticket.dispositivos?.powerbank)
+    powerbank: Boolean(ticket.dispositivos?.powerbank),
+    otros: Boolean(ticket.dispositivos?.otros)
   };
 
   return {
@@ -85,8 +86,8 @@ function prepararTicket(ticket) {
 }
 
 function validarTicket(ticket) {
-  if (!ticket.ticket || !ticket.cliente || !ticket.telefono) {
-    const validationError = new Error('Ticket, cliente y teléfono son obligatorios.');
+  if (!ticket.ticket) {
+    const validationError = new Error('El nombre de gestión es obligatorio.');
     validationError.code = 'DATOS_INCOMPLETOS';
     throw validationError;
   }
@@ -106,7 +107,7 @@ export async function crearTicket(datos) {
     return ticket;
   } catch (error) {
     if (error.name === 'ConstraintError') {
-      const duplicateError = new Error('Ya existe un registro con este número de ticket.');
+      const duplicateError = new Error('Ya existe un registro con este nombre de gestión.');
       duplicateError.code = 'TICKET_DUPLICADO';
       throw duplicateError;
     }
@@ -135,7 +136,7 @@ export async function actualizarTicket(datos) {
     return ticket;
   } catch (error) {
     if (error.name === 'ConstraintError') {
-      const duplicateError = new Error('Ya existe otro registro con este número de ticket.');
+      const duplicateError = new Error('Ya existe otro registro con este nombre de gestión.');
       duplicateError.code = 'TICKET_DUPLICADO';
       throw duplicateError;
     }
