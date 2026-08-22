@@ -2,6 +2,8 @@ import { actualizarTicket, buscarTickets, cerrarTicket, crearTicket, eliminarCer
 import { exportarRespaldo, restaurarRespaldo, validarYLeerRespaldo } from './backup.js';
 import { comprimirImagen, guardarImagen, obtenerImagenes } from './images.js';
 import { escapeHtml, formatDateTime, showToast } from './ui.js';
+import { guardarApiBaseUrl } from './config.js';
+import { iniciarSincronizacionAutomatica, observarSincronizacion, obtenerEstadoSincronizacion, sincronizar, sincronizarDatosExistentes, sincronizarEnSegundoPlano } from './sync.js';
 
 const app = document.querySelector('#app');
 const title = document.querySelector('#page-title');
@@ -9,6 +11,7 @@ const backButton = document.querySelector('[data-action="back"]');
 let selectedRecord = null;
 let pendingPhotos = new Map();
 let pendingRestore = null;
+let currentRoute = 'home';
 
 const deviceLabels = { pos: 'POS', sim: 'SIM', lectora: 'Lectora', token: 'Token', powerbank: 'Powerbank', otros: 'Otros' };
 
@@ -27,7 +30,7 @@ function renderEmpty(message) {
 
 async function renderHome() {
   const cleanupDays = localStorage.getItem('evidencias-auto-cleanup') || 'never';
-  if (cleanupDays !== 'never') await eliminarCerradosAntiguos(cleanupDays);
+  if (cleanupDays !== 'never' && await eliminarCerradosAntiguos(cleanupDays)) sincronizarEnSegundoPlano();
   const pending = await obtenerPendientes();
   app.innerHTML = `<section class="hero"><h2>Tu visita, documentada.</h2><p class="subtitle">Registra evidencias de reemplazos rápidamente, incluso sin conexión.</p></section>
     <div class="actions-grid">
@@ -67,6 +70,7 @@ function renderNew() {
       selectedRecord = await crearTicket(datos);
       pendingPhotos = new Map();
       showToast('Registro guardado correctamente.');
+      sincronizarEnSegundoPlano();
       await navigate('capture');
     } catch (error) {
       const userError = ['TICKET_DUPLICADO', 'DATOS_INCOMPLETOS', 'SIN_DISPOSITIVOS'].includes(error.code);
@@ -118,6 +122,7 @@ async function guardarFotosSeleccionadas() {
   try {
     for (const type of selectedTypes) await guardarImagen({ ticketId: selectedRecord.id, tipo: type, imagen: pendingPhotos.get(type).blob });
     showToast('Fotografías guardadas correctamente.');
+    sincronizarEnSegundoPlano();
     await navigate('detail');
   } catch (error) {
     showToast('Error al guardar las fotografías.');
@@ -151,7 +156,7 @@ function formatBytes(bytes) {
 }
 
 async function renderSettings() {
-  const summary = await obtenerResumenAlmacenamiento();
+  const [summary, syncState] = await Promise.all([obtenerResumenAlmacenamiento(), obtenerEstadoSincronizacion({ comprobar: true })]);
   let usage = 'No disponible';
   let quota = '';
   if (navigator.storage?.estimate) {
@@ -162,12 +167,15 @@ async function renderSettings() {
   let persisted = 'No confirmado';
   if (navigator.storage?.persisted) persisted = (await navigator.storage.persisted()) ? 'Protegido' : 'No protegido';
   const cleanup = localStorage.getItem('evidencias-auto-cleanup') || 'never';
+  const syncLabels = { 'sin-configurar': 'Sin configurar', 'sin-conexion': 'Sin conexión', 'sin-comprobar': 'Sin comprobar', conectado: 'Conectado', 'no-disponible': 'No disponible' };
+  const lastSync = syncState.ultimaSincronizacion ? formatDateTime(syncState.ultimaSincronizacion) : 'Nunca';
   app.innerHTML = `<section class="hero"><h2>Configuración</h2><p class="subtitle">Datos, respaldo y almacenamiento de este dispositivo.</p></section>
+    <section class="settings-section"><h3>SERVIDOR</h3><p class="helper">La aplicación siempre guarda primero en el teléfono. Cuando este servidor HTTPS está disponible, sincroniza una copia sin bloquear el trabajo offline.</p><div class="field"><label for="api-base-url">Dirección del servidor</label><input id="api-base-url" type="url" inputmode="url" placeholder="https://servidor.ejemplo.com" value="${escapeHtml(syncState.baseUrl)}"></div><div class="storage-grid"><span>Estado</span><strong>${escapeHtml(syncLabels[syncState.estado] || syncState.estado)}</strong><span>Cambios pendientes</span><strong>${syncState.pendientes}</strong><span>Última sincronización</span><strong>${escapeHtml(lastSync)}</strong></div><div class="button-stack"><button class="button button-secondary" type="button" data-action="save-server">GUARDAR SERVIDOR</button><button class="button button-primary" type="button" data-action="sync-now" ${syncState.baseUrl ? '' : 'disabled'}>SINCRONIZAR AHORA</button><button class="button button-ghost" type="button" data-action="sync-existing" ${syncState.baseUrl ? '' : 'disabled'}>SUBIR DATOS EXISTENTES</button></div></section>
     <section class="settings-section"><h3>Copias de seguridad</h3><p class="helper">Formato JSON nativo. Incluye tickets y fotografías sin servicios externos.</p><div class="button-stack"><button class="button button-secondary" type="button" data-action="export-backup">EXPORTAR RESPALDO</button><input class="file-input" id="restore-file" type="file" accept="application/json,.json"><label class="button button-ghost" for="restore-file">RESTAURAR RESPALDO</label></div>
     <dialog class="app-dialog" id="restore-dialog"><h3>¿Cómo desea restaurar?</h3><p>El respaldo contiene ${pendingRestore?.ticketCount || 0} registros y ${pendingRestore?.imageCount || 0} fotografías. Esta acción modificará los datos locales.</p><div class="button-stack"><button class="button button-danger" type="button" data-restore-mode="reemplazar">REEMPLAZAR DATOS ACTUALES</button><button class="button button-primary" type="button" data-restore-mode="combinar">COMBINAR CON DATOS ACTUALES</button><button class="button button-ghost" type="button" data-close-restore>CANCELAR</button></div></dialog></section>
     <section class="settings-section"><h3>ALMACENAMIENTO</h3><div class="storage-grid"><span>Registros</span><strong>${summary.tickets}</strong><span>Fotografías</span><strong>${summary.imagenes}</strong><span>Espacio aproximado</span><strong>${formatBytes(summary.bytes)}${usage !== 'No disponible' ? ` · navegador: ${usage}${quota}` : ''}</strong><span>Protección persistente</span><strong>${persisted}</strong></div><button class="button button-ghost" type="button" data-action="request-persist">PROTEGER ALMACENAMIENTO</button></section>
     <section class="settings-section"><h3>LIMPIEZA AUTOMÁTICA</h3><div class="field"><label for="auto-cleanup">Eliminar automáticamente registros cerrados</label><select id="auto-cleanup"><option value="never" ${cleanup === 'never' ? 'selected' : ''}>Nunca</option><option value="30" ${cleanup === '30' ? 'selected' : ''}>30 días</option><option value="60" ${cleanup === '60' ? 'selected' : ''}>60 días</option><option value="90" ${cleanup === '90' ? 'selected' : ''}>90 días</option></select></div><p class="helper">La limpieza se ejecuta al volver a Inicio y solo afecta registros cerrados.</p></section>
-    <section class="settings-section"><h3>Privacidad</h3><p class="helper">Todos los datos, fotografías y registros se almacenan localmente en este dispositivo. La aplicación no envía información a Internet.</p></section>`;
+    <section class="settings-section"><h3>Privacidad</h3><p class="helper">Todos los datos se almacenan localmente en este dispositivo. Solo se envía una copia al servidor privado que usted configure; no hay analítica, servicios externos ni transferencias a terceros.</p></section>`;
   document.querySelector('#auto-cleanup').addEventListener('change', (event) => { localStorage.setItem('evidencias-auto-cleanup', event.target.value); showToast('Configuración de limpieza guardada.'); });
   document.querySelector('#restore-file').addEventListener('change', async (event) => {
     try {
@@ -198,6 +206,7 @@ function renderEdit(record) {
     try {
       selectedRecord = await actualizarTicket({ ...record, ...changes });
       showToast('Cambios guardados correctamente.');
+      sincronizarEnSegundoPlano();
       await navigate('detail');
     } catch (error) {
       showToast(error.code === 'TICKET_DUPLICADO' ? error.message : 'Error al actualizar la información.');
@@ -226,6 +235,7 @@ async function renderDetail(record) {
 }
 
 async function navigate(route) {
+  currentRoute = route;
   title.textContent = route === 'new' ? 'Nuevo registro' : route === 'capture' ? 'Fotografías' : route === 'search' ? 'Buscar' : route === 'all' ? 'Registros' : route === 'settings' ? 'Configuración' : route === 'detail' ? 'Detalle' : 'Evidencias Soporte';
   backButton.hidden = route === 'home';
   document.querySelectorAll('.bottom-nav [data-route]').forEach((button) => button.classList.toggle('is-active', button.dataset.route === route));
@@ -246,7 +256,7 @@ async function navigate(route) {
   }
 }
 
-document.addEventListener('click', (event) => {
+document.addEventListener('click', async (event) => {
   const routeButton = event.target.closest('[data-route]');
   if (routeButton) void navigate(routeButton.dataset.route);
   const recordButton = event.target.closest('[data-record-id]');
@@ -277,19 +287,36 @@ document.addEventListener('click', (event) => {
   }
   const restoreMode = event.target.closest('[data-restore-mode]');
   if (restoreMode && pendingRestore) {
-    void restaurarRespaldo(pendingRestore, restoreMode.dataset.restoreMode).then(async () => { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); showToast('Respaldo restaurado correctamente.'); await navigate('home'); }).catch((error) => { showToast(error.message || 'No se pudo restaurar el respaldo.'); console.error(error); });
+    void restaurarRespaldo(pendingRestore, restoreMode.dataset.restoreMode).then(async () => { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); showToast('Respaldo restaurado correctamente.'); sincronizarEnSegundoPlano(); await navigate('home'); }).catch((error) => { showToast(error.message || 'No se pudo restaurar el respaldo.'); console.error(error); });
   }
   if (event.target.closest('[data-close-restore]')) { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); }
   if (event.target.closest('[data-action="edit-ticket"]')) void navigate('edit');
   if (event.target.closest('[data-action="close-ticket"]')) {
-    void cerrarTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión marcada como cerrada.'); await navigate('detail'); }).catch((error) => { showToast('Error al cerrar la gestión.'); console.error(error); });
+    void cerrarTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión marcada como cerrada.'); sincronizarEnSegundoPlano(); await navigate('detail'); }).catch((error) => { showToast('Error al cerrar la gestión.'); console.error(error); });
   }
   if (event.target.closest('[data-action="reopen-ticket"]')) {
-    void reabrirTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión reabierta correctamente.'); await navigate('detail'); }).catch((error) => { showToast('Error al reabrir la gestión.'); console.error(error); });
+    void reabrirTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión reabierta correctamente.'); sincronizarEnSegundoPlano(); await navigate('detail'); }).catch((error) => { showToast('Error al reabrir la gestión.'); console.error(error); });
   }
   if (event.target.closest('[data-action="delete-ticket"]')) {
     if (!selectedRecord || !window.confirm('¿Está seguro de eliminar este registro?\n\nTambién se eliminarán todas sus fotografías.')) return;
-    void eliminarTicket(selectedRecord.id).then(async () => { selectedRecord = null; showToast('Registro eliminado correctamente.'); await navigate('home'); }).catch((error) => { showToast('Error al eliminar el registro.'); console.error(error); });
+    void eliminarTicket(selectedRecord.id).then(async () => { selectedRecord = null; showToast('Registro eliminado correctamente.'); sincronizarEnSegundoPlano(); await navigate('home'); }).catch((error) => { showToast('Error al eliminar el registro.'); console.error(error); });
+  }
+  if (event.target.closest('[data-action="save-server"]')) {
+    try {
+      guardarApiBaseUrl(document.querySelector('#api-base-url')?.value);
+      showToast('Configuración del servidor guardada.');
+      await navigate('settings');
+      sincronizarEnSegundoPlano();
+    } catch (error) { showToast(error.message); }
+  }
+  if (event.target.closest('[data-action="sync-now"]')) {
+    showToast('Sincronizando datos...');
+    void sincronizar().then(async (result) => { showToast(result.errores ? `Sincronización parcial: ${result.errores} error(es), ${result.pendientes} pendiente(s).` : 'Sincronización completada.'); await navigate('settings'); }).catch((error) => { showToast(error.message || 'No se pudo sincronizar.'); });
+  }
+  if (event.target.closest('[data-action="sync-existing"]')) {
+    if (!window.confirm('Se prepararán todos los registros y fotografías locales para subirlos al servidor. Los UUID se conservarán. ¿Desea continuar?')) return;
+    showToast('Preparando y sincronizando datos existentes...');
+    void sincronizarDatosExistentes().then(async (result) => { showToast(`Enviados: ${result.ticketsEnviados} registros, ${result.imagenesEnviadas} fotografías. Omitidos: ${result.omitidos}. Errores: ${result.errores}.`); await navigate('settings'); }).catch((error) => { showToast(error.message || 'No se pudieron sincronizar los datos existentes.'); });
   }
   if (event.target.closest('[data-action="planned"]')) showToast('Esta función se implementará en una etapa posterior.');
 });
@@ -298,4 +325,8 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch((error) => console.error('No se pudo registrar el modo offline.', error)));
 }
 
+iniciarSincronizacionAutomatica();
+observarSincronizacion(() => {
+  if (currentRoute === 'settings') void navigate('settings');
+});
 void navigate('home');

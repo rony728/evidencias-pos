@@ -1,8 +1,9 @@
-// Capa de persistencia local. No realiza conexiones de red.
+// Capa de persistencia local. La red se maneja exclusivamente desde sync.js.
 const DB_NAME = 'evidencias-soporte-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const TICKETS_STORE = 'tickets';
 const IMAGES_STORE = 'imagenes';
+const PENDING_STORE = 'operacionesPendientes';
 
 let databasePromise;
 
@@ -30,6 +31,12 @@ function abrirBaseDatos() {
         images.createIndex('porTicket', 'ticketId', { unique: false });
         images.createIndex('porTipo', ['ticketId', 'tipo'], { unique: false });
       }
+      // La actualización a v2 solo agrega la cola: los datos existentes permanecen intactos.
+      if (!database.objectStoreNames.contains(PENDING_STORE)) {
+        const pending = database.createObjectStore(PENDING_STORE, { keyPath: 'id' });
+        pending.createIndex('porFecha', 'fechaCreacion', { unique: false });
+        pending.createIndex('porTipo', 'tipo', { unique: false });
+      }
     };
 
     request.onsuccess = () => {
@@ -51,15 +58,41 @@ function ejecutar(request) {
   });
 }
 
+function completarTransaccion(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('Error en IndexedDB.'));
+    transaction.onabort = () => reject(transaction.error || new Error('La operación local fue cancelada.'));
+  });
+}
+
+function operacionPendiente(tipo, entidadId, datos = {}) {
+  return {
+    id: `${tipo}:${entidadId}`,
+    tipo,
+    entidadId,
+    datos,
+    fechaCreacion: new Date().toISOString(),
+    intentos: 0,
+    ultimoError: null
+  };
+}
+
 function nuevoId() {
-  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (!globalThis.crypto?.getRandomValues) throw new Error('Este navegador no permite generar UUID seguros.');
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function nuevoIdInterno() {
   return nuevoId();
 }
 
-function prepararTicket(ticket) {
+function prepararTicket(ticket, conservarFechaModificacion = false) {
   const ahora = new Date().toISOString();
   const dispositivos = {
     pos: Boolean(ticket.dispositivos?.pos),
@@ -78,10 +111,13 @@ function prepararTicket(ticket) {
     telefono: String(ticket.telefono || '').trim(),
     observaciones: String(ticket.observaciones || '').trim(),
     fechaCreacion: ticket.fechaCreacion || ahora,
-    fechaModificacion: ahora,
+    fechaModificacion: conservarFechaModificacion && ticket.fechaModificacion ? ticket.fechaModificacion : ahora,
     estado: ticket.estado || 'pendiente',
     fechaCierre: Object.prototype.hasOwnProperty.call(ticket, 'fechaCierre') ? ticket.fechaCierre : null,
-    dispositivos
+    dispositivos,
+    syncStatus: ticket.syncStatus || 'pendiente',
+    ultimaSincronizacion: ticket.ultimaSincronizacion || null,
+    errorSincronizacion: null
   };
 }
 
@@ -103,7 +139,10 @@ export async function crearTicket(datos) {
   const ticket = prepararTicket(datos);
   validarTicket(ticket);
   try {
-    await ejecutar(database.transaction(TICKETS_STORE, 'readwrite').objectStore(TICKETS_STORE).add(ticket));
+    const transaction = database.transaction([TICKETS_STORE, PENDING_STORE], 'readwrite');
+    transaction.objectStore(TICKETS_STORE).add(ticket);
+    transaction.objectStore(PENDING_STORE).put(operacionPendiente('ticket-upsert', ticket.id));
+    await completarTransaccion(transaction);
     return ticket;
   } catch (error) {
     if (error.name === 'ConstraintError') {
@@ -132,7 +171,10 @@ export async function actualizarTicket(datos) {
   const ticket = prepararTicket(datos);
   validarTicket(ticket);
   try {
-    await ejecutar(database.transaction(TICKETS_STORE, 'readwrite').objectStore(TICKETS_STORE).put(ticket));
+    const transaction = database.transaction([TICKETS_STORE, PENDING_STORE], 'readwrite');
+    transaction.objectStore(TICKETS_STORE).put(ticket);
+    transaction.objectStore(PENDING_STORE).put(operacionPendiente('ticket-upsert', ticket.id));
+    await completarTransaccion(transaction);
     return ticket;
   } catch (error) {
     if (error.name === 'ConstraintError') {
@@ -147,19 +189,50 @@ export async function actualizarTicket(datos) {
 export async function eliminarTicket(id) {
   const database = await abrirBaseDatos();
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE], 'readwrite');
+    const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE, PENDING_STORE], 'readwrite');
     const ticketStore = transaction.objectStore(TICKETS_STORE);
     const imagesStore = transaction.objectStore(IMAGES_STORE);
+    const pendingStore = transaction.objectStore(PENDING_STORE);
     const keysRequest = imagesStore.index('porTicket').getAllKeys(id);
 
     keysRequest.onsuccess = () => {
-      keysRequest.result.forEach((imageId) => imagesStore.delete(imageId));
+      keysRequest.result.forEach((imageId) => {
+        imagesStore.delete(imageId);
+        pendingStore.delete(`image-create:${imageId}`);
+        pendingStore.delete(`image-delete:${imageId}`);
+      });
       ticketStore.delete(id);
+      pendingStore.delete(`ticket-upsert:${id}`);
+      pendingStore.put(operacionPendiente('ticket-delete', id));
     };
     keysRequest.onerror = () => reject(keysRequest.error || new Error('No se pudieron localizar las fotografías.'));
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error || new Error('No se pudo eliminar el registro.'));
     transaction.onabort = () => reject(transaction.error || new Error('La eliminación fue cancelada.'));
+  });
+}
+
+// Replica una eliminación remota sin crear otra operación de subida.
+export async function eliminarTicketDesdeServidor(id) {
+  const database = await abrirBaseDatos();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE, PENDING_STORE], 'readwrite');
+    const imagesStore = transaction.objectStore(IMAGES_STORE);
+    const pendingStore = transaction.objectStore(PENDING_STORE);
+    const keysRequest = imagesStore.index('porTicket').getAllKeys(id);
+    keysRequest.onsuccess = () => {
+      keysRequest.result.forEach((imageId) => {
+        imagesStore.delete(imageId);
+        pendingStore.delete(`image-create:${imageId}`);
+      });
+      transaction.objectStore(TICKETS_STORE).delete(id);
+      pendingStore.delete(`ticket-upsert:${id}`);
+      pendingStore.delete(`ticket-delete:${id}`);
+    };
+    keysRequest.onerror = () => reject(keysRequest.error || new Error('No se pudo aplicar la eliminación remota.'));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('No se pudo aplicar la eliminación remota.'));
+    transaction.onabort = () => reject(transaction.error || new Error('La eliminación remota fue cancelada.'));
   });
 }
 
@@ -197,10 +270,21 @@ export async function crearImagen(datos) {
     ticketId: datos.ticketId,
     tipo: datos.tipo,
     imagen: datos.imagen,
-    fecha: datos.fecha || new Date().toISOString()
+    fecha: datos.fecha || new Date().toISOString(),
+    syncStatus: 'pendiente',
+    ultimaSincronizacion: null,
+    errorSincronizacion: null
   };
-  await ejecutar(database.transaction(IMAGES_STORE, 'readwrite').objectStore(IMAGES_STORE).add(imagen));
+  const transaction = database.transaction([IMAGES_STORE, PENDING_STORE], 'readwrite');
+  transaction.objectStore(IMAGES_STORE).add(imagen);
+  transaction.objectStore(PENDING_STORE).put(operacionPendiente('image-create', imagen.id, { ticketId: imagen.ticketId }));
+  await completarTransaccion(transaction);
   return imagen;
+}
+
+export async function obtenerImagen(id) {
+  const database = await abrirBaseDatos();
+  return ejecutar(database.transaction(IMAGES_STORE, 'readonly').objectStore(IMAGES_STORE).get(id));
 }
 
 export async function obtenerImagenes(ticketId) {
@@ -217,28 +301,41 @@ export async function obtenerTodasImagenes() {
 
 export async function restaurarDatos({ tickets = [], imagenes = [], modo = 'combinar' }) {
   const database = await abrirBaseDatos();
-  const existentes = modo === 'combinar' ? await obtenerTickets() : [];
-  const imagenesExistentes = modo === 'combinar' ? await obtenerTodasImagenes() : [];
+  const existentes = await obtenerTickets();
+  const imagenesExistentes = await obtenerTodasImagenes();
   const ticketsPorId = new Set(existentes.map((ticket) => ticket.id));
   const numerosExistentes = new Set(existentes.map((ticket) => ticket.ticketNormalizado));
   const imagenesPorId = new Set(imagenesExistentes.map((imagen) => imagen.id));
-  const ticketsImportados = tickets.map((ticket) => prepararTicket(ticket));
-  const imagenesImportadas = imagenes.filter((imagen) => imagen?.ticketId && imagen?.imagen instanceof Blob);
+  const ticketsImportados = tickets.map((ticket) => ({
+    ...prepararTicket(ticket, true),
+    syncStatus: 'pendiente',
+    ultimaSincronizacion: null
+  }));
+  const imagenesImportadas = imagenes
+    .filter((imagen) => imagen?.ticketId && imagen?.imagen instanceof Blob)
+    .map((imagen) => ({ ...imagen, syncStatus: 'pendiente', ultimaSincronizacion: null, errorSincronizacion: null }));
 
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE], 'readwrite');
+    const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE, PENDING_STORE], 'readwrite');
     const ticketStore = transaction.objectStore(TICKETS_STORE);
     const imageStore = transaction.objectStore(IMAGES_STORE);
+    const pendingStore = transaction.objectStore(PENDING_STORE);
     const idsDisponibles = new Set(ticketsPorId);
 
     if (modo === 'reemplazar') {
       ticketStore.clear();
       imageStore.clear();
+      pendingStore.clear();
+      const importedIds = new Set(ticketsImportados.map((ticket) => ticket.id));
+      existentes
+        .filter((ticket) => !importedIds.has(ticket.id))
+        .forEach((ticket) => pendingStore.put(operacionPendiente('ticket-delete', ticket.id)));
     }
 
     for (const ticket of ticketsImportados) {
       if (modo === 'combinar' && (ticketsPorId.has(ticket.id) || numerosExistentes.has(ticket.ticketNormalizado))) continue;
       ticketStore.put(ticket);
+      pendingStore.put(operacionPendiente('ticket-upsert', ticket.id));
       idsDisponibles.add(ticket.id);
       numerosExistentes.add(ticket.ticketNormalizado);
     }
@@ -247,6 +344,7 @@ export async function restaurarDatos({ tickets = [], imagenes = [], modo = 'comb
       if (modo === 'combinar' && imagenesPorId.has(imagen.id)) continue;
       if (!idsDisponibles.has(imagen.ticketId)) continue;
       imageStore.put(imagen);
+      pendingStore.put(operacionPendiente('image-create', imagen.id, { ticketId: imagen.ticketId }));
       imagenesPorId.add(imagen.id);
     }
 
@@ -254,6 +352,95 @@ export async function restaurarDatos({ tickets = [], imagenes = [], modo = 'comb
     transaction.onerror = () => reject(transaction.error || new Error('No se pudo restaurar el respaldo.'));
     transaction.onabort = () => reject(transaction.error || new Error('La restauración fue cancelada.'));
   });
+}
+
+export async function obtenerOperacionesPendientes() {
+  const database = await abrirBaseDatos();
+  const operations = await ejecutar(database.transaction(PENDING_STORE, 'readonly').objectStore(PENDING_STORE).getAll());
+  return operations.sort((a, b) => new Date(a.fechaCreacion) - new Date(b.fechaCreacion));
+}
+
+export async function contarPendientesSincronizacion() {
+  const database = await abrirBaseDatos();
+  return ejecutar(database.transaction(PENDING_STORE, 'readonly').objectStore(PENDING_STORE).count());
+}
+
+export async function completarOperacion(id) {
+  const database = await abrirBaseDatos();
+  await ejecutar(database.transaction(PENDING_STORE, 'readwrite').objectStore(PENDING_STORE).delete(id));
+}
+
+export async function marcarOperacionError(id, error) {
+  const database = await abrirBaseDatos();
+  const current = await ejecutar(database.transaction(PENDING_STORE, 'readonly').objectStore(PENDING_STORE).get(id));
+  if (!current) return;
+  const updated = {
+    ...current,
+    intentos: (current.intentos || 0) + 1,
+    ultimoError: String(error?.message || error || 'Error desconocido'),
+    ultimoIntento: new Date().toISOString()
+  };
+  await ejecutar(database.transaction(PENDING_STORE, 'readwrite').objectStore(PENDING_STORE).put(updated));
+}
+
+// Aplica la copia elegida por el servidor sin crear una nueva operación pendiente.
+export async function aplicarTicketServidor(ticket) {
+  if (!ticket?.id) return;
+  const database = await abrirBaseDatos();
+  const local = await obtenerTicket(ticket.id);
+  if (local && new Date(local.fechaModificacion) > new Date(ticket.fechaModificacion)) return;
+  const serverTicket = {
+    ...ticket,
+    ticketNormalizado: String(ticket.ticket || '').trim().toLocaleLowerCase(),
+    syncStatus: 'sincronizado',
+    ultimaSincronizacion: new Date().toISOString(),
+    errorSincronizacion: null
+  };
+  await ejecutar(database.transaction(TICKETS_STORE, 'readwrite').objectStore(TICKETS_STORE).put(serverTicket));
+}
+
+export async function marcarImagenSincronizada(id) {
+  const database = await abrirBaseDatos();
+  const current = await obtenerImagen(id);
+  if (!current) return;
+  await ejecutar(database.transaction(IMAGES_STORE, 'readwrite').objectStore(IMAGES_STORE).put({
+    ...current,
+    syncStatus: 'sincronizado',
+    ultimaSincronizacion: new Date().toISOString(),
+    errorSincronizacion: null
+  }));
+}
+
+export async function aplicarImagenServidor(imagen) {
+  if (!imagen?.id || !(imagen.imagen instanceof Blob)) return;
+  const database = await abrirBaseDatos();
+  await ejecutar(database.transaction(IMAGES_STORE, 'readwrite').objectStore(IMAGES_STORE).put({
+    ...imagen,
+    syncStatus: 'sincronizado',
+    ultimaSincronizacion: new Date().toISOString(),
+    errorSincronizacion: null
+  }));
+}
+
+// Migración explícita e idempotente: conserva UUID y contenido de todos los datos locales.
+export async function marcarDatosExistentesPendientes() {
+  const database = await abrirBaseDatos();
+  const [tickets, imagenes] = await Promise.all([obtenerTickets(), obtenerTodasImagenes()]);
+  const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE, PENDING_STORE], 'readwrite');
+  const ticketStore = transaction.objectStore(TICKETS_STORE);
+  const imageStore = transaction.objectStore(IMAGES_STORE);
+  const pendingStore = transaction.objectStore(PENDING_STORE);
+
+  tickets.forEach((ticket) => {
+    ticketStore.put({ ...ticket, syncStatus: 'pendiente', errorSincronizacion: null });
+    pendingStore.put(operacionPendiente('ticket-upsert', ticket.id));
+  });
+  imagenes.forEach((imagen) => {
+    imageStore.put({ ...imagen, syncStatus: 'pendiente', errorSincronizacion: null });
+    pendingStore.put(operacionPendiente('image-create', imagen.id, { ticketId: imagen.ticketId }));
+  });
+  await completarTransaccion(transaction);
+  return { tickets: tickets.length, imagenes: imagenes.length };
 }
 
 export async function obtenerResumenAlmacenamiento() {
