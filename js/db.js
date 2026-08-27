@@ -275,11 +275,89 @@ export async function crearImagen(datos) {
     ultimaSincronizacion: null,
     errorSincronizacion: null
   };
-  const transaction = database.transaction([IMAGES_STORE, PENDING_STORE], 'readwrite');
-  transaction.objectStore(IMAGES_STORE).add(imagen);
-  transaction.objectStore(PENDING_STORE).put(operacionPendiente('image-create', imagen.id, { ticketId: imagen.ticketId }));
-  await completarTransaccion(transaction);
-  return imagen;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction([IMAGES_STORE, PENDING_STORE], 'readwrite');
+    const imageStore = transaction.objectStore(IMAGES_STORE);
+    const pendingStore = transaction.objectStore(PENDING_STORE);
+    const currentRequest = imageStore.index('porTipo').getAll([imagen.ticketId, imagen.tipo]);
+
+    currentRequest.onsuccess = () => {
+      currentRequest.result.forEach((current) => {
+        imageStore.delete(current.id);
+        pendingStore.delete(`image-create:${current.id}`);
+        pendingStore.put(operacionPendiente('image-delete', current.id, { ticketId: current.ticketId, tipo: current.tipo }));
+      });
+      imageStore.add(imagen);
+      pendingStore.put(operacionPendiente('image-create', imagen.id, { ticketId: imagen.ticketId, tipo: imagen.tipo }));
+    };
+    currentRequest.onerror = () => reject(currentRequest.error || new Error('No se pudo localizar la fotografía anterior.'));
+    transaction.oncomplete = () => resolve(imagen);
+    transaction.onerror = () => reject(transaction.error || new Error('No se pudo guardar la fotografía.'));
+    transaction.onabort = () => reject(transaction.error || new Error('El guardado de la fotografía fue cancelado.'));
+  });
+}
+
+// Actualiza datos, dispositivos y fotografías en una única transacción local.
+export async function guardarEdicionCompleta({ ticket: datos, fotos = [], eliminarTipos = [] }) {
+  if (!datos?.id) throw new Error('El registro que se desea editar no tiene ID.');
+  const database = await abrirBaseDatos();
+  const ticket = prepararTicket(datos);
+  validarTicket(ticket);
+  const nuevasPorTipo = new Map();
+  fotos.forEach((foto) => {
+    if (!foto?.tipo || !(foto.imagen instanceof Blob)) throw new Error('Una fotografía nueva no es válida.');
+    nuevasPorTipo.set(foto.tipo, {
+      id: foto.id || nuevoId(),
+      ticketId: ticket.id,
+      tipo: foto.tipo,
+      imagen: foto.imagen,
+      fecha: foto.fecha || new Date().toISOString(),
+      syncStatus: 'pendiente',
+      ultimaSincronizacion: null,
+      errorSincronizacion: null
+    });
+  });
+  const tiposAfectados = new Set([...eliminarTipos, ...nuevasPorTipo.keys()]);
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction([TICKETS_STORE, IMAGES_STORE, PENDING_STORE], 'readwrite');
+      const ticketStore = transaction.objectStore(TICKETS_STORE);
+      const imageStore = transaction.objectStore(IMAGES_STORE);
+      const pendingStore = transaction.objectStore(PENDING_STORE);
+
+      ticketStore.put(ticket);
+      pendingStore.put(operacionPendiente('ticket-upsert', ticket.id));
+
+      tiposAfectados.forEach((tipo) => {
+        const currentRequest = imageStore.index('porTipo').getAll([ticket.id, tipo]);
+        currentRequest.onsuccess = () => {
+          currentRequest.result.forEach((current) => {
+            imageStore.delete(current.id);
+            pendingStore.delete(`image-create:${current.id}`);
+            pendingStore.put(operacionPendiente('image-delete', current.id, { ticketId: current.ticketId, tipo: current.tipo }));
+          });
+          const nueva = nuevasPorTipo.get(tipo);
+          if (nueva) {
+            imageStore.add(nueva);
+            pendingStore.put(operacionPendiente('image-create', nueva.id, { ticketId: nueva.ticketId, tipo: nueva.tipo }));
+          }
+        };
+        currentRequest.onerror = () => transaction.abort();
+      });
+
+      transaction.oncomplete = () => resolve(ticket);
+      transaction.onerror = () => reject(transaction.error || new Error('No se pudieron guardar todos los cambios.'));
+      transaction.onabort = () => reject(transaction.error || new Error('La edición fue cancelada para evitar datos incompletos.'));
+    });
+  } catch (error) {
+    if (error.name === 'ConstraintError') {
+      const duplicateError = new Error('Ya existe otro registro con este nombre de gestión.');
+      duplicateError.code = 'TICKET_DUPLICADO';
+      throw duplicateError;
+    }
+    throw error;
+  }
 }
 
 export async function obtenerImagen(id) {
@@ -357,7 +435,11 @@ export async function restaurarDatos({ tickets = [], imagenes = [], modo = 'comb
 export async function obtenerOperacionesPendientes() {
   const database = await abrirBaseDatos();
   const operations = await ejecutar(database.transaction(PENDING_STORE, 'readonly').objectStore(PENDING_STORE).getAll());
-  return operations.sort((a, b) => new Date(a.fechaCreacion) - new Date(b.fechaCreacion));
+  const priority = { 'ticket-upsert': 0, 'image-delete': 1, 'image-create': 2, 'ticket-delete': 3 };
+  return operations.sort((a, b) => {
+    const dateDifference = new Date(a.fechaCreacion) - new Date(b.fechaCreacion);
+    return dateDifference || (priority[a.tipo] ?? 9) - (priority[b.tipo] ?? 9);
+  });
 }
 
 export async function contarPendientesSincronizacion() {

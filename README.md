@@ -15,6 +15,8 @@ PWA en Android / GitHub Pages
 
 No se utilizan frameworks frontend, CDN, Firebase, analítica ni servicios de almacenamiento externos. Las fotografías se reducen a un máximo de 1600 px y JPEG 0.82 antes de guardarse.
 
+En móvil, cada dispositivo ofrece controles separados para abrir la cámara trasera o elegir una imagen de la galería. La edición permite agregar o quitar dispositivos, añadir, reemplazar o eliminar su fotografía y guardar todos esos cambios en una única transacción local. Las eliminaciones y reemplazos también se incorporan a la cola de sincronización.
+
 ## Estructura
 
 ```text
@@ -94,6 +96,8 @@ En GitHub, abra **Settings → Pages**, seleccione **Deploy from a branch**, ram
 - Buscar por nombre de gestión, cliente y teléfono.
 - Cerrar, reabrir y eliminar; confirmar la cascada de fotografías.
 - Capturar fotografías, reiniciar la PWA y verificar los Blob.
+- Elegir fotografías desde cámara y galería; editar un registro para agregar, reemplazar y eliminar fotos sin crear duplicados por dispositivo.
+- Usar **Registrar otra gestión** desde Detalle y comprobar que el formulario nuevo esté vacío y el registro anterior permanezca intacto.
 - Detener el backend, crear cambios y confirmar el contador pendiente.
 - Iniciar el backend, sincronizar y verificar tickets/imágenes en otro cliente.
 - Eliminar offline, reconectar y confirmar que el tombstone evita reaparición.

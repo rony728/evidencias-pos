@@ -113,6 +113,15 @@ test('GET de imagen entrega el Blob con su tipo MIME', async () => {
   });
 });
 
+test('DELETE de imagen utiliza el UUID y responde de forma idempotente', async () => {
+  await withServer(async (baseUrl, database) => {
+    const response = await fetch(`${baseUrl}/api/imagenes/${IMAGE_ID}`, { method: 'DELETE' });
+    assert.equal(response.status, 204);
+    const deletion = database.calls.find((call) => call.sql === 'DELETE FROM imagenes WHERE id = $1');
+    assert.deepEqual(deletion.params, [IMAGE_ID]);
+  });
+});
+
 test('DELETE de ticket registra tombstone antes de borrar', async () => {
   await withServer(async (baseUrl, database) => {
     const response = await fetch(`${baseUrl}/api/tickets/${ID}`, {

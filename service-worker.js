@@ -1,4 +1,4 @@
-const CACHE_NAME = 'evidencias-pos-v8';
+const CACHE_NAME = 'evidencias-pos-v9';
 const APP_SHELL = [
   './',
   './index.html',

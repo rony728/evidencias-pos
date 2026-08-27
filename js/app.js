@@ -1,4 +1,4 @@
-import { actualizarTicket, buscarTickets, cerrarTicket, crearTicket, eliminarCerradosAntiguos, eliminarTicket, obtenerPendientes, obtenerResumenAlmacenamiento, obtenerTickets, reabrirTicket } from './db.js';
+import { buscarTickets, cerrarTicket, crearTicket, eliminarCerradosAntiguos, eliminarTicket, guardarEdicionCompleta, obtenerPendientes, obtenerResumenAlmacenamiento, obtenerTickets, reabrirTicket } from './db.js';
 import { exportarRespaldo, restaurarRespaldo, validarYLeerRespaldo } from './backup.js';
 import { comprimirImagen, guardarImagen, obtenerImagenes } from './images.js';
 import { escapeHtml, formatDateTime, showToast } from './ui.js';
@@ -12,8 +12,66 @@ let selectedRecord = null;
 let pendingPhotos = new Map();
 let pendingRestore = null;
 let currentRoute = 'home';
+let editState = null;
+const activeObjectUrls = new Set();
 
 const deviceLabels = { pos: 'POS', sim: 'SIM', lectora: 'Lectora', token: 'Token', powerbank: 'Powerbank', otros: 'Otros' };
+
+function crearObjectUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  activeObjectUrls.add(url);
+  return url;
+}
+
+function liberarObjectUrl(url) {
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  activeObjectUrls.delete(url);
+}
+
+function limpiarObjectUrls() {
+  activeObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  activeObjectUrls.clear();
+}
+
+function limpiarEstadoRegistroTemporal() {
+  limpiarObjectUrls();
+  pendingPhotos = new Map();
+  editState = null;
+}
+
+async function procesarArchivoFoto(file, type, destination, onReady) {
+  if (!file) return;
+  try {
+    showToast('Procesando fotografía...');
+    const compressed = await comprimirImagen(file);
+    const previous = destination.get(type);
+    if (previous?.url) liberarObjectUrl(previous.url);
+    destination.set(type, { ...compressed, url: crearObjectUrl(compressed.blob) });
+    onReady(type);
+    showToast('Fotografía lista para guardar.');
+  } catch (error) {
+    showToast('No se pudo procesar la fotografía.');
+    console.error(error);
+  }
+}
+
+function photoSourceControls(type, context, hasPhoto = false) {
+  const cameraId = `${context}-camera-${type}`;
+  const galleryId = `${context}-gallery-${type}`;
+  return `<div class="photo-source-actions">
+    <input class="file-input" id="${cameraId}" type="file" accept="image/*" capture="environment" data-photo-input="${type}" data-photo-context="${context}">
+    <label class="button button-secondary" for="${cameraId}">${hasPhoto ? 'TOMAR NUEVA FOTO' : 'TOMAR FOTO'}</label>
+    <input class="file-input" id="${galleryId}" type="file" accept="image/*" data-photo-input="${type}" data-photo-context="${context}">
+    <label class="button button-ghost" for="${galleryId}">ELEGIR DE GALERÍA</label>
+  </div>`;
+}
+
+function iniciarNuevoRegistro() {
+  selectedRecord = null;
+  limpiarEstadoRegistroTemporal();
+  return navigate('new');
+}
 
 function recordCard(record) {
   const estado = record.estado === 'cerrado' ? 'CERRADO' : 'PENDIENTE';
@@ -84,31 +142,20 @@ function renderPhotoPreview(type) {
   const preview = document.querySelector(`[data-photo-preview="${type}"]`);
   const photo = pendingPhotos.get(type);
   if (!preview || !photo) return;
-  preview.innerHTML = `<img src="${photo.url}" alt="Vista previa de ${escapeHtml(deviceLabels[type])}"><button class="button button-ghost photo-repeat" type="button" data-repeat-photo="${type}">REPETIR FOTO</button><p class="photo-info">${photo.width} × ${photo.height}px · ${(photo.blob.size / 1024 / 1024).toFixed(2)} MB</p>`;
+  preview.innerHTML = `<img src="${photo.url}" alt="Vista previa de ${escapeHtml(deviceLabels[type])}"><p class="photo-info">${photo.width} × ${photo.height}px · ${(photo.blob.size / 1024 / 1024).toFixed(2)} MB</p>`;
 }
 
 function renderCapture(ticket) {
   const selectedDevices = Object.entries(ticket.dispositivos || {}).filter(([, selected]) => selected).map(([type]) => type);
-  app.innerHTML = `<section class="hero"><h2>Fotografías</h2><p class="subtitle">Toma una fotografía por cada dispositivo reemplazado. Las imágenes se comprimen localmente antes de guardarse.</p></section>
-    <div class="photo-list">${selectedDevices.map((type) => `<section class="photo-card"><div class="photo-heading"><h3>${deviceLabels[type]}</h3><span class="helper">Obligatoria</span></div><div class="photo-preview" data-photo-preview="${type}"><p class="empty-state">Todavía no hay fotografía.</p></div><input class="file-input" id="photo-${type}" type="file" accept="image/*" capture="environment" data-photo-input="${type}"><label class="button button-secondary" for="photo-${type}">TOMAR FOTO</label></section>`).join('')}</div>
+  app.innerHTML = `<section class="hero"><h2>Fotografías</h2><p class="subtitle">Toma o elige una fotografía por cada dispositivo reemplazado. Las imágenes se comprimen localmente antes de guardarse.</p></section>
+    <div class="photo-list">${selectedDevices.map((type) => `<section class="photo-card"><div class="photo-heading"><h3>${deviceLabels[type]}</h3><span class="helper">Obligatoria</span></div><div class="photo-preview" data-photo-preview="${type}"><p class="empty-state">Todavía no hay fotografía.</p></div>${photoSourceControls(type, 'capture')}</section>`).join('')}</div>
     <div class="button-stack"><button class="button button-primary" type="button" data-action="save-photos">GUARDAR FOTOGRAFÍAS</button><button class="button button-ghost" type="button" data-action="skip-photos">GUARDAR SIN FOTOGRAFÍAS</button></div>`;
 
   document.querySelectorAll('[data-photo-input]').forEach((input) => input.addEventListener('change', async (event) => {
     const file = event.target.files?.[0];
     const type = event.target.dataset.photoInput;
     if (!file) return;
-    try {
-      showToast('Procesando fotografía...');
-      const compressed = await comprimirImagen(file);
-      const previous = pendingPhotos.get(type);
-      if (previous) URL.revokeObjectURL(previous.url);
-      pendingPhotos.set(type, { ...compressed, url: URL.createObjectURL(compressed.blob) });
-      renderPhotoPreview(type);
-      showToast('Fotografía lista para guardar.');
-    } catch (error) {
-      showToast('No se pudo procesar la fotografía.');
-      console.error(error);
-    }
+    await procesarArchivoFoto(file, type, pendingPhotos, renderPhotoPreview);
     event.target.value = '';
   }));
 }
@@ -191,25 +238,112 @@ async function renderSettings() {
   });
 }
 
-function renderEdit(record) {
-  app.innerHTML = `<section class="hero"><h2>Editar registro</h2><p class="subtitle">Actualiza el nombre de gestión y los datos opcionales. Las fotografías y dispositivos seleccionados se conservarán.</p></section>
+function fotoEfectivaEdicion(type) {
+  const pending = editState?.pendingPhotos.get(type);
+  if (pending) return { ...pending, temporal: true };
+  if (editState?.deletedTypes.has(type)) return null;
+  return editState?.existingImages.get(type) || null;
+}
+
+function renderEditPhotoBlocks() {
+  const container = document.querySelector('#edit-photo-list');
+  const form = document.querySelector('#edit-ticket-form');
+  if (!container || !form || !editState) return;
+  const selectedTypes = [...form.querySelectorAll('input[name="dispositivos"]:checked')].map((input) => input.value);
+  container.innerHTML = selectedTypes.map((type) => {
+    const photo = fotoEfectivaEdicion(type);
+    const preview = photo
+      ? `<img src="${escapeHtml(photo.url)}" alt="${photo.temporal ? 'Nueva fotografía' : 'Fotografía actual'} de ${escapeHtml(deviceLabels[type])}"><p class="photo-info">${photo.temporal ? 'Nueva fotografía · se guardará al confirmar' : 'Fotografía actual'}</p>`
+      : renderEmpty('Todavía no hay fotografía.');
+    return `<section class="photo-card" data-edit-photo-card="${type}"><div class="photo-heading"><h3>${deviceLabels[type]}</h3><span class="helper">${photo ? (photo.temporal ? 'Nueva' : 'Actual') : 'Sin fotografía'}</span></div><div class="photo-preview">${preview}</div>${photoSourceControls(type, 'edit', Boolean(photo))}${photo ? `<button class="button button-danger edit-delete-photo" type="button" data-delete-edit-photo="${type}">ELIMINAR FOTO</button>` : ''}</section>`;
+  }).join('') || renderEmpty('Seleccione al menos un dispositivo.');
+}
+
+function prepararEliminacionFotoEdicion(type) {
+  const pending = editState?.pendingPhotos.get(type);
+  if (pending?.url) liberarObjectUrl(pending.url);
+  editState?.pendingPhotos.delete(type);
+  const existing = editState?.existingImages.get(type);
+  if (existing) {
+    liberarObjectUrl(existing.url);
+    existing.url = null;
+    editState.deletedTypes.add(type);
+  }
+}
+
+async function renderEdit(record) {
+  const images = await obtenerImagenes(record.id);
+  const latestByType = new Map();
+  images.forEach((image) => {
+    const current = latestByType.get(image.tipo);
+    if (!current || new Date(image.fecha) >= new Date(current.fecha)) latestByType.set(image.tipo, image);
+  });
+  latestByType.forEach((image) => { image.url = crearObjectUrl(image.imagen); });
+  editState = { existingImages: latestByType, pendingPhotos: new Map(), deletedTypes: new Set() };
+
+  app.innerHTML = `<section class="hero"><h2>Editar registro</h2><p class="subtitle">Actualiza los datos, dispositivos y fotografías de esta gestión.</p></section>
     <form class="form-card" id="edit-ticket-form">
-      <div class="field"><label for="edit-ticket">Nombre de Gestión</label><input id="edit-ticket" name="ticket" type="text" required value="${escapeHtml(record.ticket)}"></div>
-      <div class="field"><label for="edit-cliente">Nombre del cliente <span class="helper">(opcional)</span></label><input id="edit-cliente" name="cliente" value="${escapeHtml(record.cliente)}"></div>
-      <div class="field"><label for="edit-telefono">Teléfono del cliente <span class="helper">(opcional)</span></label><input id="edit-telefono" name="telefono" type="tel" value="${escapeHtml(record.telefono)}"></div>
-      <div class="field"><label for="edit-observaciones">Observaciones <span class="helper">(opcional)</span></label><textarea id="edit-observaciones" name="observaciones">${escapeHtml(record.observaciones || '')}</textarea></div>
+      <fieldset><legend>DATOS DE LA GESTIÓN</legend><div class="edit-data-fields">
+        <div class="field"><label for="edit-ticket">Nombre de Gestión</label><input id="edit-ticket" name="ticket" type="text" required value="${escapeHtml(record.ticket)}"></div>
+        <div class="field"><label for="edit-cliente">Nombre del cliente <span class="helper">(opcional)</span></label><input id="edit-cliente" name="cliente" value="${escapeHtml(record.cliente)}"></div>
+        <div class="field"><label for="edit-telefono">Teléfono del cliente <span class="helper">(opcional)</span></label><input id="edit-telefono" name="telefono" type="tel" value="${escapeHtml(record.telefono)}"></div>
+        <div class="field"><label for="edit-observaciones">Observaciones <span class="helper">(opcional)</span></label><textarea id="edit-observaciones" name="observaciones">${escapeHtml(record.observaciones || '')}</textarea></div>
+      </div></fieldset>
+      <fieldset><legend>DISPOSITIVOS / FOTOGRAFÍAS</legend><div class="device-grid">
+        ${Object.entries(deviceLabels).map(([value, label]) => `<label class="device-option"><input type="checkbox" name="dispositivos" value="${value}" ${record.dispositivos?.[value] ? 'checked' : ''}><span>${label}</span></label>`).join('')}
+      </div></fieldset>
+      <div class="photo-list edit-photo-list" id="edit-photo-list"></div>
       <button class="button button-primary" type="submit">GUARDAR CAMBIOS</button>
     </form>`;
-  document.querySelector('#edit-ticket-form').addEventListener('submit', async (event) => {
+  renderEditPhotoBlocks();
+
+  const form = document.querySelector('#edit-ticket-form');
+  form.addEventListener('change', async (event) => {
+    const input = event.target;
+    if (input.matches('[data-photo-input][data-photo-context="edit"]')) {
+      const file = input.files?.[0];
+      await procesarArchivoFoto(file, input.dataset.photoInput, editState.pendingPhotos, (type) => {
+        const existing = editState.existingImages.get(type);
+        if (existing?.url) {
+          liberarObjectUrl(existing.url);
+          existing.url = null;
+        }
+        renderEditPhotoBlocks();
+      });
+      input.value = '';
+      return;
+    }
+    if (!input.matches('input[name="dispositivos"]')) return;
+    const type = input.value;
+    if (!input.checked && fotoEfectivaEdicion(type)) {
+      const confirmed = window.confirm(`${deviceLabels[type]} tiene una fotografía guardada.\n\nSi elimina este dispositivo de la gestión, también se eliminará su fotografía.\n\n¿Desea continuar?`);
+      if (!confirmed) {
+        input.checked = true;
+        return;
+      }
+      prepararEliminacionFotoEdicion(type);
+      showToast(`${deviceLabels[type]} y su fotografía se eliminarán al guardar.`);
+    }
+    renderEditPhotoBlocks();
+  });
+
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const changes = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const selectedDevices = [...form.querySelectorAll('input[name="dispositivos"]:checked')].map((input) => input.value);
+    if (!selectedDevices.length) {
+      showToast('Debe seleccionar al menos un dispositivo.');
+      return;
+    }
+    const changes = Object.fromEntries(new FormData(form).entries());
+    changes.dispositivos = Object.fromEntries(Object.keys(deviceLabels).map((type) => [type, selectedDevices.includes(type)]));
+    const fotos = [...editState.pendingPhotos].map(([tipo, photo]) => ({ tipo, imagen: photo.blob }));
     try {
-      selectedRecord = await actualizarTicket({ ...record, ...changes });
+      selectedRecord = await guardarEdicionCompleta({ ticket: { ...record, ...changes }, fotos, eliminarTipos: [...editState.deletedTypes] });
       showToast('Cambios guardados correctamente.');
       sincronizarEnSegundoPlano();
       await navigate('detail');
     } catch (error) {
-      showToast(error.code === 'TICKET_DUPLICADO' ? error.message : 'Error al actualizar la información.');
+      showToast(error.code === 'TICKET_DUPLICADO' ? error.message : 'Error al actualizar la información. No se aplicaron cambios incompletos.');
       if (error.code !== 'TICKET_DUPLICADO') console.error(error);
     }
   });
@@ -220,7 +354,7 @@ async function renderDetail(record) {
   const devices = Object.entries(record.dispositivos || {}).filter(([, selected]) => selected).map(([type]) => deviceLabels[type]);
   const images = await obtenerImagenes(record.id);
   const gallery = images.length ? images.map((item) => {
-    const imageUrl = URL.createObjectURL(item.imagen);
+    const imageUrl = crearObjectUrl(item.imagen);
     const label = deviceLabels[item.tipo] || item.tipo;
     return `<button class="stored-photo" type="button" data-open-photo="${escapeHtml(imageUrl)}" aria-label="Abrir fotografía de ${escapeHtml(label)}"><img src="${escapeHtml(imageUrl)}" alt="Fotografía de ${escapeHtml(label)}"><span>${escapeHtml(label)}</span></button>`;
   }).join('') : renderEmpty('Todavía no hay fotografías guardadas.');
@@ -231,19 +365,23 @@ async function renderDetail(record) {
   app.innerHTML = `<section class="hero"><h2>Detalle del registro</h2><p class="subtitle">Información de la gestión guardada localmente.</p></section>
     <div class="detail-card"><div class="detail-row"><span class="detail-label">Nombre de Gestión</span><strong>${escapeHtml(record.ticket)}</strong></div><div class="detail-row"><span class="detail-label">Fecha</span><span>${escapeHtml(formatDateTime(record.fechaCreacion))}</span></div>${closeDate}<div class="detail-row"><span class="detail-label">Cliente</span><span>${escapeHtml(record.cliente || 'Sin nombre')}</span></div><div class="detail-row"><span class="detail-label">Teléfono</span><span>${escapeHtml(record.telefono || 'Sin teléfono')}</span></div><div class="detail-row"><span class="detail-label">Estado</span><span class="status-badge ${record.estado === 'cerrado' ? 'is-closed' : ''}">${escapeHtml(record.estado.toUpperCase())}</span></div><div class="detail-row"><span class="detail-label">Observaciones</span><span>${escapeHtml(record.observaciones || 'Sin observaciones')}</span></div><div class="detail-row"><span class="detail-label">Dispositivos</span><span>${escapeHtml(devices.join(', ') || 'Sin dispositivos')}</span></div></div>
     <section class="stored-gallery"><div class="section-heading"><h2>Fotografías</h2><span class="helper">${images.length}</span></div><div class="photo-gallery">${gallery}</div></section>
-    <div class="button-stack"><button class="button button-secondary" type="button" data-action="edit-ticket">EDITAR</button>${stateAction}<button class="button button-danger" type="button" data-action="delete-ticket">ELIMINAR</button></div>`;
+    <div class="button-stack"><button class="button button-secondary" type="button" data-action="new-record">REGISTRAR OTRA GESTIÓN</button><button class="button button-secondary" type="button" data-action="edit-ticket">EDITAR</button>${stateAction}<button class="button button-danger" type="button" data-action="delete-ticket">ELIMINAR</button></div>`;
 }
 
 async function navigate(route) {
+  const previousRoute = currentRoute;
+  limpiarObjectUrls();
+  if (previousRoute === 'capture' && route !== 'capture') pendingPhotos = new Map();
+  if (previousRoute === 'edit') editState = null;
   currentRoute = route;
-  title.textContent = route === 'new' ? 'Nuevo registro' : route === 'capture' ? 'Fotografías' : route === 'search' ? 'Buscar' : route === 'all' ? 'Registros' : route === 'settings' ? 'Configuración' : route === 'detail' ? 'Detalle' : 'Evidencias Soporte';
+  title.textContent = route === 'new' ? 'Nuevo registro' : route === 'capture' ? 'Fotografías' : route === 'edit' ? 'Editar' : route === 'search' ? 'Buscar' : route === 'all' ? 'Registros' : route === 'settings' ? 'Configuración' : route === 'detail' ? 'Detalle' : 'Evidencias Soporte';
   backButton.hidden = route === 'home';
   document.querySelectorAll('.bottom-nav [data-route]').forEach((button) => button.classList.toggle('is-active', button.dataset.route === route));
   try {
     if (route === 'home') await renderHome();
     else if (route === 'new') renderNew();
     else if (route === 'capture') renderCapture(selectedRecord);
-    else if (route === 'edit') renderEdit(selectedRecord);
+    else if (route === 'edit') await renderEdit(selectedRecord);
     else if (route === 'search') await renderSearch();
     else if (route === 'all') await renderAll();
     else if (route === 'settings') await renderSettings();
@@ -258,11 +396,21 @@ async function navigate(route) {
 
 document.addEventListener('click', async (event) => {
   const routeButton = event.target.closest('[data-route]');
-  if (routeButton) void navigate(routeButton.dataset.route);
+  if (routeButton) {
+    if (routeButton.dataset.route === 'new') void iniciarNuevoRegistro();
+    else void navigate(routeButton.dataset.route);
+  }
   const recordButton = event.target.closest('[data-record-id]');
   if (recordButton) void obtenerTickets().then((tickets) => { selectedRecord = tickets.find((record) => record.id === recordButton.dataset.recordId); if (selectedRecord) return navigate('detail'); showToast('No se encontró el registro.'); }).catch(() => showToast('Error al abrir el registro.'));
-  const repeatButton = event.target.closest('[data-repeat-photo]');
-  if (repeatButton) document.querySelector(`[data-photo-input="${repeatButton.dataset.repeatPhoto}"]`)?.click();
+  const deleteEditPhoto = event.target.closest('[data-delete-edit-photo]');
+  if (deleteEditPhoto && editState) {
+    const type = deleteEditPhoto.dataset.deleteEditPhoto;
+    if (window.confirm(`¿Desea eliminar la fotografía de ${deviceLabels[type]}?`)) {
+      prepararEliminacionFotoEdicion(type);
+      renderEditPhotoBlocks();
+      showToast('La fotografía se eliminará al guardar los cambios.');
+    }
+  }
   const openPhoto = event.target.closest('[data-open-photo]');
   if (openPhoto) {
     const lightbox = document.createElement('div');
@@ -290,6 +438,7 @@ document.addEventListener('click', async (event) => {
     void restaurarRespaldo(pendingRestore, restoreMode.dataset.restoreMode).then(async () => { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); showToast('Respaldo restaurado correctamente.'); sincronizarEnSegundoPlano(); await navigate('home'); }).catch((error) => { showToast(error.message || 'No se pudo restaurar el respaldo.'); console.error(error); });
   }
   if (event.target.closest('[data-close-restore]')) { pendingRestore = null; document.querySelector('#restore-dialog')?.close(); }
+  if (event.target.closest('[data-action="new-record"]')) void iniciarNuevoRegistro();
   if (event.target.closest('[data-action="edit-ticket"]')) void navigate('edit');
   if (event.target.closest('[data-action="close-ticket"]')) {
     void cerrarTicket(selectedRecord.id).then(async (updated) => { selectedRecord = updated; showToast('Gestión marcada como cerrada.'); sincronizarEnSegundoPlano(); await navigate('detail'); }).catch((error) => { showToast('Error al cerrar la gestión.'); console.error(error); });

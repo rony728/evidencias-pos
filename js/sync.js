@@ -63,10 +63,13 @@ async function procesarOperacion(operation) {
   return resultado;
 }
 
-async function descargarCambios() {
+async function descargarCambios(pendingOperations = []) {
+  const pendingTicketDeletes = new Set(pendingOperations.filter((operation) => operation.tipo === 'ticket-delete').map((operation) => operation.entidadId));
+  const pendingImageDeletes = new Set(pendingOperations.filter((operation) => operation.tipo === 'image-delete').map((operation) => operation.entidadId));
   const { tickets, eliminados = [] } = await obtenerTicketsServidor();
   for (const deleted of eliminados) await eliminarTicketDesdeServidor(deleted.id);
   for (const ticket of tickets) {
+    if (pendingTicketDeletes.has(ticket.id)) continue;
     await aplicarTicketServidor(ticket);
     const [metadata, localImages] = await Promise.all([
       obtenerMetadatosImagenes(ticket.id),
@@ -74,7 +77,7 @@ async function descargarCambios() {
     ]);
     const localIds = new Set(localImages.map((image) => image.id));
     for (const remoteImage of metadata) {
-      if (localIds.has(remoteImage.id)) continue;
+      if (localIds.has(remoteImage.id) || pendingImageDeletes.has(remoteImage.id)) continue;
       const blob = await descargarImagenServidor(remoteImage.id);
       await aplicarImagenServidor({
         id: remoteImage.id,
@@ -105,7 +108,7 @@ export async function sincronizar({ descargar = true } = {}) {
       }
     }
     if (descargar) {
-      try { await descargarCambios(); } catch { summary.errores += 1; }
+      try { await descargarCambios(await obtenerOperacionesPendientes()); } catch { summary.errores += 1; }
     }
     const ultimaSincronizacion = summary.errores ? obtenerUltimaSincronizacion() : guardarUltimaSincronizacion();
     return { ...summary, ultimaSincronizacion, pendientes: await contarPendientesSincronizacion() };
