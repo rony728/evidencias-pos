@@ -89,7 +89,11 @@ function renderEmpty(message) {
 async function renderHome() {
   const cleanupDays = localStorage.getItem('evidencias-auto-cleanup') || 'never';
   if (cleanupDays !== 'never' && await eliminarCerradosAntiguos(cleanupDays)) sincronizarEnSegundoPlano();
-  const pending = await obtenerPendientes();
+  const [pending, syncState] = await Promise.all([
+    obtenerPendientes(),
+    obtenerEstadoSincronizacion({ comprobar: true })
+  ]);
+  const lastSync = syncState.ultimaSincronizacion ? formatDateTime(syncState.ultimaSincronizacion) : 'Nunca';
   app.innerHTML = `<section class="hero"><h2>Tu visita, documentada.</h2><p class="subtitle">Registra evidencias de reemplazos rápidamente, incluso sin conexión.</p></section>
     <div class="actions-grid">
       <button class="button button-primary" type="button" data-route="new">＋ NUEVO REGISTRO</button>
@@ -97,6 +101,10 @@ async function renderHome() {
       <button class="button button-ghost" type="button" data-route="all">VER TODOS LOS REGISTROS</button>
       <button class="button button-ghost" type="button" data-route="settings">⚙ CONFIGURACIÓN</button>
     </div>
+    <section class="home-sync" aria-label="Sincronización">
+      <div><span>Última sincronización</span><strong>${escapeHtml(lastSync)}</strong></div>
+      <button class="button button-secondary" type="button" data-action="sync-now" ${syncState.baseUrl ? '' : 'disabled'}>SINCRONIZAR AHORA</button>
+    </section>
     <section><div class="section-heading"><h2>Pendientes</h2><span class="helper">${pending.length} registros</span></div><div class="record-list">${pending.length ? pending.map(recordCard).join('') : renderEmpty('No hay tickets pendientes.')}</div></section>`;
 }
 
@@ -459,8 +467,9 @@ document.addEventListener('click', async (event) => {
     } catch (error) { showToast(error.message); }
   }
   if (event.target.closest('[data-action="sync-now"]')) {
+    const routeAtStart = currentRoute;
     showToast('Sincronizando datos...');
-    void sincronizar().then(async (result) => { showToast(result.errores ? `Sincronización parcial: ${result.errores} error(es), ${result.pendientes} pendiente(s).` : 'Sincronización completada.'); await navigate('settings'); }).catch((error) => { showToast(error.message || 'No se pudo sincronizar.'); });
+    void sincronizar().then(async (result) => { showToast(result.errores ? `Sincronización parcial: ${result.errores} error(es), ${result.pendientes} pendiente(s).` : 'Sincronización completada.'); if (currentRoute === routeAtStart) await navigate(routeAtStart); }).catch((error) => { showToast(error.message || 'No se pudo sincronizar.'); });
   }
   if (event.target.closest('[data-action="sync-existing"]')) {
     if (!window.confirm('Se prepararán todos los registros y fotografías locales para subirlos al servidor. Los UUID se conservarán. ¿Desea continuar?')) return;
@@ -476,6 +485,6 @@ if ('serviceWorker' in navigator) {
 
 iniciarSincronizacionAutomatica();
 observarSincronizacion(() => {
-  if (currentRoute === 'settings') void navigate('settings');
+  if (currentRoute === 'settings' || currentRoute === 'home') void navigate(currentRoute);
 });
 void navigate('home');
